@@ -1,3 +1,3 @@
-module github.com/0x7A77/fins
+module github.com/oldmaCloud/fins
 
 go 1.22.0

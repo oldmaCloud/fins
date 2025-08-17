@@ -9,15 +9,12 @@ import (
 	"log"
 	"net"
 	"reflect"
-	"sync"
 	"time"
 )
 
 // TcpClient Omron FINS client
 type TcpClient struct {
-	conn *net.TCPConn
-	resp []chan response
-	sync.Mutex
+	conn              *net.TCPConn
 	dst               finsAddress
 	src               finsAddress
 	sid               byte
@@ -72,8 +69,8 @@ func NewTCPConn(ip, port string, plcAddrNetwork, plcAddrNode, plcAddrUnit, local
 		return nil, err
 	}
 	log.Println("握手信号回复为：", string(resv))
-	c.resp = make([]chan response, 256) // storage for all responses, sid is byte - only 256 values
-	go c.listenLoop()
+	// 移除 goroutine，改为单线程实现
+	// go c.listenLoop()
 	return c, nil
 }
 
@@ -82,7 +79,7 @@ func (c *TcpClient) SetByteOrder(o binary.ByteOrder) {
 }
 
 func (c *TcpClient) SetTimeoutMs(t uint) {
-	c.responseTimeoutMs = time.Duration(t)
+	c.responseTimeoutMs = time.Duration(t) * time.Millisecond
 }
 
 func (c *TcpClient) Close() {
@@ -305,12 +302,8 @@ func (c *TcpClient) nextHeader() *Header {
 }
 
 func (c *TcpClient) incrementSid() byte {
-	c.Lock() // thread-safe sid incrementation
 	c.sid++
-	sid := c.sid
-	c.Unlock()
-	c.resp[sid] = make(chan response) // clearing cell of storage for new response
-	return sid
+	return c.sid
 }
 
 func (c *TcpClient) sendCommand(command []byte) (*response, error) {
@@ -334,44 +327,35 @@ func (c *TcpClient) sendCommand(command []byte) (*response, error) {
 	if err != nil {
 		return nil, err
 	}
-	// header.serviceID = 0
 
-	// if response timeout is zero, block indefinitely
-	if c.responseTimeoutMs > 0 {
-		select {
-		case resp := <-c.resp[1]:
-			// log.Println("send serviceID:", header.serviceID)
-			return &resp, nil
-		case <-time.After(c.responseTimeoutMs * time.Millisecond):
-			return nil, ResponseTimeoutError{c.responseTimeoutMs}
-		}
-	} else {
-		// log.Println("send serviceID:", header.serviceID)
-		resp := <-c.resp[header.serviceID]
-		return &resp, nil
-	}
+	// 单线程实现：直接读取响应，而不是等待通道
+	return c.readResponse()
 }
 
-func (c *TcpClient) listenLoop() {
-	for {
-		buf := make([]byte, 2048)
-		n, err := bufio.NewReader(c.conn).Read(buf)
+// readResponse 单线程读取响应
+func (c *TcpClient) readResponse() (*response, error) {
+	// 设置读取超时
+	if c.responseTimeoutMs > 0 {
+		err := c.conn.SetReadDeadline(time.Now().Add(c.responseTimeoutMs * time.Millisecond))
 		if err != nil {
-			// do not complain when connection is closed by user
-			if !c.closed {
-				log.Fatal(err)
-			}
-			break
+			return nil, err
 		}
+		defer c.conn.SetReadDeadline(time.Time{}) // 清除超时设置
+	}
 
-		if n > 0 {
-			ans := decodeResponse(buf[16:n])
-			// log.Println("buf:", buf[16:n])
-			// log.Println("ans:", ans)
-			c.resp[1] <- ans
-		} else {
-			log.Println("cannot read response: ", buf)
-		}
+	buf := make([]byte, 2048)
+	n, err := bufio.NewReader(c.conn).Read(buf)
+	if err != nil {
+		return nil, err
+	}
+
+	if n > 0 {
+		ans := decodeResponse(buf[16:n])
+		// log.Println("buf:", buf[16:n])
+		// log.Println("ans:", ans)
+		return &ans, nil
+	} else {
+		return nil, fmt.Errorf("cannot read response: %v", buf)
 	}
 }
 

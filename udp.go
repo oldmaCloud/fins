@@ -4,17 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
-	"log"
+	"fmt"
 	"net"
-	"sync"
 	"time"
 )
 
 // UdpClient Omron FINS client
 type UdpClient struct {
-	conn *net.UDPConn
-	resp []chan response
-	sync.Mutex
+	conn              *net.UDPConn
 	dst               finsAddress
 	src               finsAddress
 	sid               byte
@@ -67,8 +64,9 @@ func NewUDPConn(remoteAddr, remotePort, localAddr, localPort string, plcAddrNetw
 
 	c.conn = conn
 
-	c.resp = make([]chan response, 256) // storage for all responses, sid is byte - only 256 values
-	go c.listenLoop()
+	// 移除 goroutine，改为单线程实现
+	// c.resp = make([]chan response, 256) // storage for all responses, sid is byte - only 256 values
+	// go c.listenLoop()
 	return c, nil
 }
 
@@ -82,7 +80,7 @@ func (c *UdpClient) SetByteOrder(o binary.ByteOrder) {
 // Default value: 20ms.
 // A timeout of zero can be used to block indefinitely.
 func (c *UdpClient) SetTimeoutMs(t uint) {
-	c.responseTimeoutMs = time.Duration(t)
+	c.responseTimeoutMs = time.Duration(t) * time.Millisecond
 }
 
 // Close Closes an Omron FINS connection
@@ -306,12 +304,8 @@ func (c *UdpClient) nextHeader() *Header {
 }
 
 func (c *UdpClient) incrementSid() byte {
-	c.Lock() // thread-safe sid incrementation
 	c.sid++
-	sid := c.sid
-	c.Unlock()
-	c.resp[sid] = make(chan response) // clearing cell of storage for new response
-	return sid
+	return c.sid
 }
 
 func (c *UdpClient) sendCommand(command []byte) (*response, error) {
@@ -324,38 +318,32 @@ func (c *UdpClient) sendCommand(command []byte) (*response, error) {
 		return nil, err
 	}
 
-	// if response timeout is zero, block indefinitely
-	if c.responseTimeoutMs > 0 {
-		select {
-		case resp := <-c.resp[header.serviceID]:
-			return &resp, nil
-		case <-time.After(c.responseTimeoutMs * time.Millisecond):
-			return nil, ResponseTimeoutError{c.responseTimeoutMs}
-		}
-	} else {
-		resp := <-c.resp[header.serviceID]
-		return &resp, nil
-	}
+	// 单线程实现：直接读取响应，而不是等待通道
+	return c.readResponse()
 }
 
-func (c *UdpClient) listenLoop() {
-	for {
-		buf := make([]byte, 2048)
-		n, err := bufio.NewReader(c.conn).Read(buf)
+// readResponse 单线程读取响应
+func (c *UdpClient) readResponse() (*response, error) {
+	// 设置读取超时
+	if c.responseTimeoutMs > 0 {
+		err := c.conn.SetReadDeadline(time.Now().Add(c.responseTimeoutMs * time.Millisecond))
 		if err != nil {
-			// do not complain when connection is closed by user
-			if !c.closed {
-				log.Fatal(err)
-			}
-			break
+			return nil, err
 		}
+		defer c.conn.SetReadDeadline(time.Time{}) // 清除超时设置
+	}
 
-		if n > 0 {
-			ans := decodeResponse(buf[:n])
-			c.resp[ans.header.serviceID] <- ans
-		} else {
-			log.Println("cannot read response: ", buf)
-		}
+	buf := make([]byte, 2048)
+	n, err := bufio.NewReader(c.conn).Read(buf)
+	if err != nil {
+		return nil, err
+	}
+
+	if n > 0 {
+		ans := decodeResponse(buf[:n])
+		return &ans, nil
+	} else {
+		return nil, fmt.Errorf("cannot read response: %v", buf)
 	}
 }
 

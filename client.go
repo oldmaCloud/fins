@@ -29,7 +29,6 @@ type Client interface {
 	nextHeader() *Header
 	incrementSid() byte
 	sendCommand(command []byte) (*response, error)
-	listenLoop()
 }
 
 func NewClient(_type, remoteAddr, remotePort, localAddr, localPort string, plcAddrNetwork, plcAddrNode, plcAddrUnit, localAddrNetwork, localAddrNode, localAddrUnit byte) (Client, error) {
