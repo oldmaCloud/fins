@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"strconv"
 	"time"
 )
 
@@ -24,6 +25,7 @@ type UdpClient struct {
 
 func NewUDPConn(remoteAddr, remotePort, localAddr, localPort string, plcAddrNetwork, plcAddrNode, plcAddrUnit, localAddrNetwork, localAddrNode, localAddrUnit byte) (Client, error) {
 	c := new(UdpClient)
+	// 与 TCP 客户端保持一致：dst 是本地地址，src 是 PLC 地址
 	c.dst = finsAddress{
 		network: localAddrNetwork,
 		node:    localAddrNode,
@@ -43,7 +45,14 @@ func NewUDPConn(remoteAddr, remotePort, localAddr, localPort string, plcAddrNetw
 	// }
 	raddr := &net.UDPAddr{
 		IP:   net.ParseIP(remoteAddr),
-		Port: 5010,
+		Port: 5010, // FINS UDP 默认端口
+	}
+
+	// 如果用户指定了端口，使用用户指定的端口
+	if remotePort != "" {
+		if port, err := strconv.Atoi(remotePort); err == nil {
+			raddr.Port = port
+		}
 	}
 	var err error
 
@@ -51,7 +60,8 @@ func NewUDPConn(remoteAddr, remotePort, localAddr, localPort string, plcAddrNetw
 	if localAddr == "" && localPort == "" {
 		laddr = nil
 	} else {
-		laddr, err = net.ResolveUDPAddr(localAddr, localPort)
+		// 修复本地地址解析
+		laddr, err = net.ResolveUDPAddr("udp", localAddr+":"+localPort)
 		if err != nil {
 			return nil, err
 		}
